@@ -37,6 +37,49 @@
 #import "components/video_frame_buffer/RTCCVPixelBuffer.h"
 #import "platform/darwin/TGRTCCVPixelBuffer.h"
 
+// Lovegram integration hooks. The accessor DEFINITIONS live here in
+// tgcalls/macos — keeping definition + call site in the same image dodges
+// link-order subtleties when the LovegramCallRecorder package archive
+// assigns them at +load. Meyers singletons (function-local statics), NOT
+// plain globals: a plain global std::function in this image could be
+// default-constructed AFTER the recorder's +load assignment and silently
+// wipe the hook. Signatures mirror shared/call_recorder/lovegram_adm_hook.h,
+// redeclared here (not #included) to avoid a tgcalls -> recorder
+// include-path coupling.
+#include "api/scoped_refptr.h"
+#include "modules/audio_device/include/audio_device.h"
+#include <cstddef>
+#include <cstdint>
+#include <functional>
+namespace lovegram {
+using AdmWrapFn = std::function<webrtc::scoped_refptr<webrtc::AudioDeviceModule>(
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule>)>;
+using GroupAudioFrameFn = std::function<void(uint32_t /*ssrc*/,
+                                             const int16_t* /*samples*/,
+                                             size_t /*sampleCount*/,
+                                             size_t /*channels*/,
+                                             uint32_t /*sampleRate*/)>;
+using TapFn = std::function<void(const int16_t* /*samples*/,
+                                 size_t /*count*/,
+                                 size_t /*channels*/,
+                                 uint32_t /*sampleRate*/)>;
+using AnnouncementActiveFn = std::function<bool()>;
+using AnnouncementMixFn = std::function<void(int16_t* /*buffer*/,
+                                             size_t /*frames*/,
+                                             size_t /*channels*/,
+                                             uint32_t /*sampleRate*/)>;
+AdmWrapFn& admWrapHook() { static AdmWrapFn f; return f; }
+GroupAudioFrameFn& groupAudioFrameHook() { static GroupAudioFrameFn f; return f; }
+TapFn& tapLocalHook() { static TapFn f; return f; }
+TapFn& tapRemoteHook() { static TapFn f; return f; }
+AnnouncementActiveFn& announcementActiveHook() { static AnnouncementActiveFn f; return f; }
+AnnouncementMixFn& announcementMixHook() { static AnnouncementMixFn f; return f; }
+AnnouncementMixFn& announcementMixLocalHook() { static AnnouncementMixFn f; return f; }
+} // namespace lovegram
+// Macro (not function) to keep linkage simple at the call sites below.
+#define LOVEGRAM_MAYBE_WRAP_ADM(adm) \
+    (lovegram::admWrapHook() ? lovegram::admWrapHook()((adm)) : (adm))
+
 @implementation OngoingCallConnectionDescriptionWebrtc
 
 - (instancetype _Nonnull)initWithReflectorId:(uint8_t)reflectorId hasStun:(bool)hasStun hasTurn:(bool)hasTurn hasTcp:(bool)hasTcp ip:(NSString * _Nonnull)ip port:(int32_t)port username:(NSString * _Nonnull)username password:(NSString * _Nonnull)password {
@@ -1042,11 +1085,19 @@ static void (*InternalVoipLoggingFunction)(NSString *) = NULL;
                     }
                 }];
             },
+            // Lovegram: route the 1:1 ADM through the recording wrapper.
+            // Constructs WebRTC's default platform ADM (what tgcalls would
+            // have created internally had this field been left null) and
+            // passes it through lovegram::admWrapHook() if installed.
+            .createAudioDeviceModule = [](webrtc::TaskQueueFactory *taskQueueFactory)
+                    -> webrtc::scoped_refptr<webrtc::AudioDeviceModule> {
+                auto realAdm = webrtc::AudioDeviceModule::Create(
+                    webrtc::AudioDeviceModule::kPlatformDefaultAudio,
+                    taskQueueFactory);
+                return LOVEGRAM_MAYBE_WRAP_ADM(realAdm);
+            },
             .initialInputDeviceId = inputDeviceId.UTF8String,
             .initialOutputDeviceId = outputDeviceId.UTF8String,
-//            .createAudioDeviceModule = [](webrtc::TaskQueueFactory *taskQueueFactory) -> rtc::scoped_refptr<webrtc::AudioDeviceModule> {
-//                return rtc::make_ref_counted<webrtc::tgcalls_ios_adm::AudioDeviceModuleIOS>(false, false, 1);
-//            }
         });
         _state = OngoingCallStateInitializing;
         _signalBars = 4;
