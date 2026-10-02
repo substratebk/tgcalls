@@ -68,6 +68,17 @@ using AnnouncementMixFn = std::function<void(int16_t* /*buffer*/,
                                              size_t /*frames*/,
                                              size_t /*channels*/,
                                              uint32_t /*sampleRate*/)>;
+using ControlledAdmWrapFn = std::function<webrtc::scoped_refptr<webrtc::AudioDeviceModule>(
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule>, std::function<bool()>, std::function<bool()>)>;
+ControlledAdmWrapFn& controlledAdmWrapHook() { static ControlledAdmWrapFn f; return f; }
+static webrtc::scoped_refptr<webrtc::AudioDeviceModule> WrapControlled(
+    webrtc::scoped_refptr<webrtc::AudioDeviceModule> adm, std::shared_ptr<tgcalls::RecordingAudioState> state) {
+    if (!controlledAdmWrapHook()) return adm;
+    return controlledAdmWrapHook()(adm,
+        [state] { return state->microphoneMuted.load() || !state->audioSessionActive.load() || !state->audioRouteActive.load(); },
+        [state] { return state->disclosureRequested.load() && state->transportConnected.load() && state->audioSessionActive.load() && state->audioRouteActive.load() &&
+            (state->supported.load() ? state->sendReady.load() : !state->microphoneMuted.load()); });
+}
 AdmWrapFn& admWrapHook() { static AdmWrapFn f; return f; }
 GroupAudioFrameFn& groupAudioFrameHook() { static GroupAudioFrameFn f; return f; }
 TapFn& tapLocalHook() { static TapFn f; return f; }
@@ -732,6 +743,7 @@ tgcalls::VideoCaptureInterfaceObject *GetVideoCaptureAssumingSameThread(tgcalls:
 
     
     std::unique_ptr<tgcalls::Instance> _tgVoip;
+    std::shared_ptr<tgcalls::RecordingAudioState> _recordingAudioState;
     bool _didStop;
     
     OngoingCallStateWebrtc _state;
@@ -962,6 +974,8 @@ static void (*InternalVoipLoggingFunction)(NSString *) = NULL;
         [OngoingCallThreadLocalContextWebrtc ensureRegisteredImplementations];
         
         __weak OngoingCallThreadLocalContextWebrtc *weakSelf = self;
+        _recordingAudioState = std::make_shared<tgcalls::RecordingAudioState>();
+        auto recordingAudioState = _recordingAudioState;
         _tgVoip = tgcalls::Meta::Create([version UTF8String], (tgcalls::Descriptor){
             .version = [version UTF8String],
             .config = config,
@@ -1089,16 +1103,18 @@ static void (*InternalVoipLoggingFunction)(NSString *) = NULL;
             // Constructs WebRTC's default platform ADM (what tgcalls would
             // have created internally had this field been left null) and
             // passes it through lovegram::admWrapHook() if installed.
-            .createAudioDeviceModule = [](webrtc::TaskQueueFactory *taskQueueFactory)
+            .createAudioDeviceModule = [recordingAudioState](webrtc::TaskQueueFactory *taskQueueFactory)
                     -> webrtc::scoped_refptr<webrtc::AudioDeviceModule> {
                 auto realAdm = webrtc::AudioDeviceModule::Create(
                     webrtc::AudioDeviceModule::kPlatformDefaultAudio,
                     taskQueueFactory);
-                return LOVEGRAM_MAYBE_WRAP_ADM(realAdm);
+                return lovegram::WrapControlled(realAdm, recordingAudioState);
             },
             .initialInputDeviceId = inputDeviceId.UTF8String,
             .initialOutputDeviceId = outputDeviceId.UTF8String,
+            .recordingAudioState = recordingAudioState,
         });
+        _recordingAudioState->supported.store(_tgVoip && _tgVoip->supportsRecordingDisclosure());
         _state = OngoingCallStateInitializing;
         _signalBars = 4;
     }
@@ -1139,6 +1155,11 @@ static void (*InternalVoipLoggingFunction)(NSString *) = NULL;
 }
 
 - (void)stop:(void (^)(NSString *, int64_t, int64_t, int64_t, int64_t))completion {
+    if (_recordingAudioState) {
+        _recordingAudioState->disclosureRequested.store(false);
+        _recordingAudioState->sendReady.store(false);
+        _recordingAudioState->audioRouteActive.store(false);
+    }
     if (!_tgVoip) {
         return;
     }
@@ -1195,6 +1216,10 @@ static void (*InternalVoipLoggingFunction)(NSString *) = NULL;
 }
 
 - (void)controllerStateChanged:(tgcalls::State)state {
+    if (_recordingAudioState) {
+        _recordingAudioState->transportConnected.store(state == tgcalls::State::Established);
+        if (state != tgcalls::State::Established) _recordingAudioState->sendReady.store(false);
+    }
     OngoingCallStateWebrtc callState = OngoingCallStateInitializing;
     switch (state) {
         case tgcalls::State::Established:
@@ -1245,7 +1270,19 @@ static void (*InternalVoipLoggingFunction)(NSString *) = NULL;
     }
 }
 
+- (void)setRecordingDisclosure:(BOOL)enabled completion:(void (^)(BOOL, BOOL))completion {
+    if (!_tgVoip || !_recordingAudioState) { completion(NO, NO); return; }
+    _recordingAudioState->disclosureRequested.store(enabled);
+    if (!enabled) _recordingAudioState->sendReady.store(false);
+    _tgVoip->setRecordingDisclosure(enabled);
+    const bool supported = _tgVoip->supportsRecordingDisclosure();
+    const bool ready = _recordingAudioState->transportConnected.load() && _recordingAudioState->audioSessionActive.load() && _recordingAudioState->audioRouteActive.load() &&
+        (supported ? _recordingAudioState->sendReady.load() : !_recordingAudioState->microphoneMuted.load());
+    completion(supported, ready);
+}
+
 - (void)setIsMuted:(bool)isMuted {
+    if (_recordingAudioState) _recordingAudioState->microphoneMuted.store(isMuted);
     if (_tgVoip) {
         _tgVoip->setMuteMicrophone(isMuted);
     }

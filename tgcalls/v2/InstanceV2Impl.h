@@ -24,6 +24,8 @@ public:
     void setRequestedVideoAspect(float aspect) override;
 	void setNetworkType(NetworkType networkType) override;
 	void setMuteMicrophone(bool muteMicrophone) override;
+    bool supportsRecordingDisclosure() const override { return true; }
+    void setRecordingDisclosure(bool enabled) override;
 	bool supportsVideo() override {
 		return true;
 	}
