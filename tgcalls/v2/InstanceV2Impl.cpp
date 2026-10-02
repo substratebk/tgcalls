@@ -228,15 +228,16 @@ public:
         _outgoingAudioChannel = nullptr;
     }
 
-    void setIsMuted(bool isMuted) {
-        if (_isMuted != isMuted) {
+    bool setIsMuted(bool isMuted) {
+        if (_isMuted != isMuted || (!isMuted && !_sendConfigured)) {
             _isMuted = isMuted;
-
+            _sendConfigured = false;
             _outgoingAudioChannel->Enable(!_isMuted);
             _threads->getWorkerThread()->BlockingCall([&]() {
-                _outgoingAudioChannel->send_channel()->SetAudioSend(_ssrc, !_isMuted, nullptr, _audioSource);
+                _sendConfigured = _outgoingAudioChannel->send_channel()->SetAudioSend(_ssrc, !_isMuted, nullptr, _audioSource) && !_isMuted;
             });
         }
+        return _sendConfigured;
     }
 
     uint32_t ssrc() const {
@@ -274,6 +275,7 @@ private:
     cricket::VoiceChannel *_outgoingAudioChannel = nullptr;
 
     bool _isMuted = true;
+    bool _sendConfigured = false;
 };
 
 namespace {
@@ -922,6 +924,7 @@ public:
     InstanceV2ImplInternal(Descriptor &&descriptor, std::shared_ptr<Threads> threads) :
     _webrtcEnvironment(webrtc::EnvironmentFactory().Create()),
     _threads(threads),
+    _recordingAudioState(descriptor.recordingAudioState),
     _rtcServers(descriptor.rtcServers),
     _proxy(std::move(descriptor.proxy)),
     _directConnectionChannel(descriptor.directConnectionChannel),
@@ -966,6 +969,7 @@ public:
     }
 
     ~InstanceV2ImplInternal() {
+        if (_recordingAudioState) _recordingAudioState->sendReady.store(false);
         _incomingAudioChannel.reset();
         _incomingVideoChannel.reset();
         _incomingScreencastChannel.reset();
@@ -1395,7 +1399,7 @@ public:
                             outgoingAudioContent.value(),
                             _threads
                         ));
-                        _outgoingAudioChannel->setIsMuted(_isMicrophoneMuted);
+                        updateRecordingAudioSend();
                     }
                 }
             }
@@ -1875,6 +1879,7 @@ public:
         }
 
         _networkState = state;
+        updateRecordingAudioSend();
         _stateUpdated(mappedState);
     }
 
@@ -2041,13 +2046,30 @@ public:
 
     }
 
+    // BEGIN Lovegram downstream disclosure gate
+    void updateRecordingAudioSend() {
+        if (_recordingAudioState) _recordingAudioState->sendReady.store(false);
+        if (!_outgoingAudioChannel) return;
+        const bool disclosure = _recordingDisclosure && _recordingAudioState &&
+            _recordingAudioState->audioSessionActive.load() && _recordingAudioState->audioRouteActive.load() && _networkState && _networkState->isReadyToSendData && !_networkState->isFailed;
+        const bool accepted = _outgoingAudioChannel->setIsMuted(_isMicrophoneMuted && !disclosure);
+        if (_recordingAudioState) _recordingAudioState->sendReady.store(disclosure && accepted);
+    }
+
+    void setRecordingDisclosure(bool enabled) {
+        _recordingDisclosure = enabled;
+        updateRecordingAudioSend();
+    }
+    // END Lovegram downstream disclosure gate
+
     void setMuteMicrophone(bool muteMicrophone) {
         if (_isMicrophoneMuted != muteMicrophone) {
             _isMicrophoneMuted = muteMicrophone;
 
-            if (_outgoingAudioChannel) {
-                _outgoingAudioChannel->setIsMuted(muteMicrophone);
-            }
+            // The Apple call queue publishes the latest user intent directly
+            // to the PCM adapter. Do not overwrite it here: this media-thread
+            // task may be older than a subsequently requested mute toggle.
+            updateRecordingAudioSend();
 
             sendMediaState();
         }
@@ -2199,6 +2221,8 @@ private:
     webrtc::Environment _webrtcEnvironment;
     SignalingProtocolVersion _signalingProtocolVersion = SignalingProtocolVersion::V3;
     std::shared_ptr<Threads> _threads;
+    std::shared_ptr<RecordingAudioState> _recordingAudioState;
+    bool _recordingDisclosure = false;
     std::vector<RtcServer> _rtcServers;
     std::unique_ptr<Proxy> _proxy;
     std::shared_ptr<DirectConnectionChannel> _directConnectionChannel;
@@ -2323,6 +2347,12 @@ void InstanceV2Impl::setRequestedVideoAspect(float aspect) {
 void InstanceV2Impl::setNetworkType(NetworkType networkType) {
     _internal->perform([networkType](InstanceV2ImplInternal *internal) {
         internal->setNetworkType(networkType);
+    });
+}
+
+void InstanceV2Impl::setRecordingDisclosure(bool enabled) {
+    _internal->perform([enabled](InstanceV2ImplInternal *internal) {
+        internal->setRecordingDisclosure(enabled);
     });
 }
 

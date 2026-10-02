@@ -2,6 +2,7 @@
 #define TGCALLS_INSTANCE_H
 
 #include <cstdint>
+#include <atomic>
 #include <functional>
 #include <vector>
 #include <string>
@@ -176,6 +177,19 @@ struct MediaDevicesConfig {
 	float outputVolume = 1.f;
 };
 
+// Per-call state shared with the Apple PCM adapter. No user mute preference is
+// changed to transmit generated disclosure; readiness is published only after
+// the downstream channel accepts sending and the transport is connected.
+struct RecordingAudioState {
+    std::atomic<bool> microphoneMuted{false};
+    std::atomic<bool> sendReady{false};
+    std::atomic<bool> audioSessionActive{true};
+    std::atomic<bool> audioRouteActive{true};
+    std::atomic<bool> disclosureRequested{false};
+    std::atomic<bool> supported{false};
+    std::atomic<bool> transportConnected{false};
+};
+
 class Instance {
 protected:
 	Instance() = default;
@@ -185,6 +199,8 @@ public:
 
 	virtual void setNetworkType(NetworkType networkType) = 0;
 	virtual void setMuteMicrophone(bool muteMicrophone) = 0;
+    virtual bool supportsRecordingDisclosure() const { return false; }
+    virtual void setRecordingDisclosure(bool enabled) {}
 	virtual void setAudioOutputGainControlEnabled(bool enabled) = 0;
 	virtual void setEchoCancellationStrength(int strength) = 0;
 
@@ -242,6 +258,7 @@ struct Descriptor {
     std::string initialInputDeviceId;
     std::string initialOutputDeviceId;
     std::shared_ptr<DirectConnectionChannel> directConnectionChannel;
+    std::shared_ptr<RecordingAudioState> recordingAudioState;
 };
 
 class Meta {
