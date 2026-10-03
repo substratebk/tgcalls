@@ -1271,11 +1271,11 @@ public:
 
     void sendSignalingMessage(signaling::Message const &message) {
         auto data = message.serialize();
-        sendRawSignalingMessage(data);
+        sendRawSignalingMessage(data, absl::get_if<signaling::RecordingConsentMessage>(&message.data) != nullptr);
     }
 
-    void sendRawSignalingMessage(std::vector<uint8_t> const &data) {
-        RTC_LOG(LS_INFO) << "sendSignalingMessage: " << std::string(data.begin(), data.end());
+    void sendRawSignalingMessage(std::vector<uint8_t> const &data, bool privateControl = false) {
+        if (!privateControl) RTC_LOG(LS_INFO) << "sendSignalingMessage: " << std::string(data.begin(), data.end());
 
         if (_signalingConnection && _signalingEncryptedConnection) {
             switch (_signalingProtocolVersion) {
@@ -1628,6 +1628,7 @@ public:
                 data.ufrag = ufrag;
                 data.pwd = pwd;
                 data.supportsRenomination = supportsRenomination;
+                data.recordingProtocol = strong->_recordingAudioState ? 1 : 0;
 
                 signaling::DtlsFingerprint dtlsFingerprint;
                 dtlsFingerprint.hash = hash;
@@ -1714,14 +1715,18 @@ public:
     }
 
     void processSignalingData(const std::vector<uint8_t> &data) {
-        RTC_LOG(LS_INFO) << "processSignalingData: " << std::string(data.begin(), data.end());
-
         const auto message = signaling::Message::parse(data);
         if (!message) {
             return;
         }
         const auto messageData = &message->data;
+        if (const auto consent = absl::get_if<signaling::RecordingConsentMessage>(messageData)) {
+            _recordingConsent.receive(consent->token, consent->action, rtc::TimeMillis(), recordingConsentSender());
+            return;
+        }
+        RTC_LOG(LS_INFO) << "processSignalingData: " << std::string(data.begin(), data.end());
         if (const auto initialSetup = absl::get_if<signaling::InitialSetupMessage>(messageData)) {
+            _recordingConsent.negotiate(_recordingAudioState && initialSetup->recordingProtocol == 1);
             PeerIceParameters remoteIceParameters;
             remoteIceParameters.ufrag = initialSetup->ufrag;
             remoteIceParameters.pwd = initialSetup->pwd;
@@ -2046,6 +2051,16 @@ public:
 
     }
 
+    RecordingConsent::Send recordingConsentSender() {
+        return [this](const std::string &token, const std::string &action) {
+            signaling::Message message; message.data = signaling::RecordingConsentMessage{token, action};
+            sendSignalingMessage(message);
+        };
+    }
+    void updateRecordingConsent(const std::string &action, const std::string &token, const std::function<void(RecordingConsentSnapshot)> &completion) {
+        completion(_recordingConsent.command(action, token, rtc::TimeMillis(), recordingConsentSender()));
+    }
+
     // BEGIN Lovegram downstream disclosure gate
     void updateRecordingAudioSend() {
         if (_recordingAudioState) _recordingAudioState->sendReady.store(false);
@@ -2223,6 +2238,7 @@ private:
     std::shared_ptr<Threads> _threads;
     std::shared_ptr<RecordingAudioState> _recordingAudioState;
     bool _recordingDisclosure = false;
+    RecordingConsent _recordingConsent;
     std::vector<RtcServer> _rtcServers;
     std::unique_ptr<Proxy> _proxy;
     std::shared_ptr<DirectConnectionChannel> _directConnectionChannel;
@@ -2347,6 +2363,12 @@ void InstanceV2Impl::setRequestedVideoAspect(float aspect) {
 void InstanceV2Impl::setNetworkType(NetworkType networkType) {
     _internal->perform([networkType](InstanceV2ImplInternal *internal) {
         internal->setNetworkType(networkType);
+    });
+}
+
+void InstanceV2Impl::updateRecordingConsent(std::string action, std::string token, std::function<void(RecordingConsentSnapshot)> completion) {
+    _internal->perform([action = std::move(action), token = std::move(token), completion = std::move(completion)](InstanceV2ImplInternal *internal) {
+        internal->updateRecordingConsent(action, token, completion);
     });
 }
 

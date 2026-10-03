@@ -2,6 +2,7 @@
 #define TGCALLS_INSTANCE_H
 
 #include <cstdint>
+#include "RecordingConsent.h"
 #include <atomic>
 #include <functional>
 #include <vector>
@@ -201,6 +202,9 @@ public:
 	virtual void setMuteMicrophone(bool muteMicrophone) = 0;
     virtual bool supportsRecordingDisclosure() const { return false; }
     virtual void setRecordingDisclosure(bool enabled) {}
+    virtual void updateRecordingConsent(std::string action, std::string token, std::function<void(RecordingConsentSnapshot)> completion) {
+        RecordingConsentSnapshot state; state.capability = 0; completion(state);
+    }
 	virtual void setAudioOutputGainControlEnabled(bool enabled) = 0;
 	virtual void setEchoCancellationStrength(int strength) = 0;
 
