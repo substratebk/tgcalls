@@ -1,4 +1,5 @@
 #include "v2/Signaling.h"
+#include "RecordingConsent.h"
 
 #include "third-party/json11.hpp"
 
@@ -372,6 +373,7 @@ std::vector<uint8_t> InitialSetupMessage_serialize(const InitialSetupMessage * c
     object.insert(std::make_pair("ufrag", json11::Json(message->ufrag)));
     object.insert(std::make_pair("pwd", json11::Json(message->pwd)));
     object.insert(std::make_pair("renomination", json11::Json(message->supportsRenomination)));
+    if (message->recordingProtocol == 1) object["lovegramRecordingProtocol"] = 1;
 
     json11::Json::array jsonFingerprints;
     for (const auto &fingerprint : message->fingerprints) {
@@ -443,6 +445,8 @@ absl::optional<InitialSetupMessage> InitialSetupMessage_parse(json11::Json::obje
     message.ufrag = ufrag->second.string_value();
     message.pwd = pwd->second.string_value();
     message.supportsRenomination = renominationValue;
+    const auto recordingProtocol = object.find("lovegramRecordingProtocol");
+    if (recordingProtocol != object.end() && recordingProtocol->second.is_number() && recordingProtocol->second.number_value() == 1) message.recordingProtocol = 1;
     message.fingerprints = std::move(parsedFingerprints);
 
     return message;
@@ -758,6 +762,10 @@ std::vector<uint8_t> Message::serialize() const {
         return MediaStateMessage_serialize(mediaState);
     } else if (const auto negotiateChannels = absl::get_if<NegotiateChannelsMessage>(&data)) {
         return NegotiateChannelsMessage_serialize(negotiateChannels);
+    } else if (const auto consent = absl::get_if<RecordingConsentMessage>(&data)) {
+        if (!RecordingConsent::validToken(consent->token) || !RecordingConsent::validAction(consent->action)) return {};
+        const auto json = json11::Json(json11::Json::object{{"@type", "LovegramRecordingConsent"}, {"token", consent->token}, {"action", consent->action}}).dump();
+        return std::vector<uint8_t>(json.begin(), json.end());
     } else {
         return {};
     }
@@ -780,7 +788,16 @@ absl::optional<Message> Message::parse(const std::vector<uint8_t> &data) {
         RTC_LOG(LS_ERROR) << "Signaling: @type attribute must be a string";
         return absl::nullopt;
     }
-    if (type->second.string_value() == "InitialSetup") {
+    if (type->second.string_value() == "LovegramRecordingConsent") {
+        if (data.size() > 1024) return absl::nullopt;
+        const auto token = json.object_items().find("token");
+        const auto action = json.object_items().find("action");
+        if (token == json.object_items().end() || action == json.object_items().end() ||
+            !token->second.is_string() || !action->second.is_string() ||
+            !RecordingConsent::validToken(token->second.string_value()) || !RecordingConsent::validAction(action->second.string_value())) return absl::nullopt;
+        Message message; message.data = RecordingConsentMessage{token->second.string_value(), action->second.string_value()};
+        return message;
+    } else if (type->second.string_value() == "InitialSetup") {
         auto parsed = InitialSetupMessage_parse(json.object_items());
         if (!parsed) {
             RTC_LOG(LS_ERROR) << "Signaling: could not parse " << type->second.string_value() << " message";

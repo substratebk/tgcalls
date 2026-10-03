@@ -141,6 +141,7 @@ struct InitialSetupMessage {
     std::string ufrag;
     std::string pwd;
     bool supportsRenomination = false;
+    int recordingProtocol = 0;
     std::vector<DtlsFingerprint> fingerprints;
 };
 
@@ -175,12 +176,18 @@ struct MediaStateMessage {
 
 };
 
+struct RecordingConsentMessage {
+    std::string token;
+    std::string action;
+};
+
 struct Message {
     absl::variant<
         InitialSetupMessage,
         NegotiateChannelsMessage,
         CandidatesMessage,
-        MediaStateMessage> data;
+        MediaStateMessage,
+        RecordingConsentMessage> data;
 
     std::vector<uint8_t> serialize() const;
     static absl::optional<Message> parse(const std::vector<uint8_t> &data);
