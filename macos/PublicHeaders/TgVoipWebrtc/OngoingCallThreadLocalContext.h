@@ -249,6 +249,7 @@ typedef NS_ENUM(int32_t, OngoingCallDataSavingWebrtc) {
 - (NSString * _Nullable)version;
 - (NSData * _Nonnull)getDerivedState;
 
+- (void)updateRecordingConsent:(NSString * _Nonnull)action token:(NSString * _Nonnull)token completion:(void (^ _Nonnull)(NSInteger capability, NSString * _Nonnull incomingToken, NSString * _Nonnull outgoingToken, NSInteger status))completion;
 - (void)setRecordingDisclosure:(BOOL)enabled completion:(void (^ _Nonnull)(BOOL supported, BOOL ready))completion;
 - (void)setIsMuted:(bool)isMuted;
 - (void)setIsLowBatteryLevel:(bool)isLowBatteryLevel;

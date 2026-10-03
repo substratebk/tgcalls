@@ -1270,6 +1270,14 @@ static void (*InternalVoipLoggingFunction)(NSString *) = NULL;
     }
 }
 
+- (void)updateRecordingConsent:(NSString *)action token:(NSString *)token completion:(void (^)(NSInteger, NSString *, NSString *, NSInteger))completion {
+    if (!_tgVoip) { completion(-1, @"", @"", 0); return; }
+    _tgVoip->updateRecordingConsent(action.UTF8String, token.UTF8String, [completion](tgcalls::RecordingConsentSnapshot state) {
+        completion(state.capability, [NSString stringWithUTF8String:state.incomingToken.c_str()],
+            [NSString stringWithUTF8String:state.outgoingToken.c_str()], state.outgoingStatus);
+    });
+}
+
 - (void)setRecordingDisclosure:(BOOL)enabled completion:(void (^)(BOOL, BOOL))completion {
     if (!_tgVoip || !_recordingAudioState) { completion(NO, NO); return; }
     _recordingAudioState->disclosureRequested.store(enabled);

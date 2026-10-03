@@ -26,6 +26,7 @@ public:
 	void setMuteMicrophone(bool muteMicrophone) override;
     bool supportsRecordingDisclosure() const override { return true; }
     void setRecordingDisclosure(bool enabled) override;
+    void updateRecordingConsent(std::string action, std::string token, std::function<void(RecordingConsentSnapshot)> completion) override;
 	bool supportsVideo() override {
 		return true;
 	}
